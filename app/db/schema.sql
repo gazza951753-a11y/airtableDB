@@ -74,7 +74,6 @@ CREATE TABLE IF NOT EXISTS movements (
     fingerprint TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(serial_number) REFERENCES equipment(serial_number) ON DELETE SET NULL,
     FOREIGN KEY(import_batch_id) REFERENCES import_batches(id) ON DELETE SET NULL
 );
 
@@ -103,8 +102,7 @@ CREATE TABLE IF NOT EXISTS trip_equipment (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(trip_id, serial_number),
-    FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE,
-    FOREIGN KEY(serial_number) REFERENCES equipment(serial_number) ON DELETE SET NULL
+    FOREIGN KEY(trip_id) REFERENCES trips(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_equipment_inventory ON equipment(inventory_number);
