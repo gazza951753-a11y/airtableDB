@@ -25,10 +25,15 @@ def apply_style(app: QApplication) -> None:
 def resolve_schema_path() -> Path:
     """Возвращает путь к schema.sql в обычном и PyInstaller-режиме."""
     if getattr(sys, "frozen", False):
+        # В one-folder сборке PyInstaller данные попадают в папку приложения,
+        # в one-file — во временную _MEIPASS директорию.
+
         base_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
         schema_path = base_dir / "app" / "db" / "schema.sql"
         if schema_path.exists():
             return schema_path
+
+    # Запуск из исходников
 
     return Path(__file__).resolve().parent / "db" / "schema.sql"
 
@@ -42,6 +47,15 @@ def main() -> int:
     db = Database(DB_PATH)
     db.connect()
 
+    schema_path = resolve_schema_path()
+    if not schema_path.exists():
+        QMessageBox.critical(
+            None,
+            "Ошибка запуска",
+            f"Не найден файл схемы БД:\n{schema_path}\n\n"
+            f"Переустановите приложение или пересоберите EXE.",
+        )
+        return 1
     schema_path: Path | None = resolve_schema_path()
     if not schema_path.exists():
         QMessageBox.warning(
@@ -51,6 +65,7 @@ def main() -> int:
             f"Будет использована встроенная схема БД.",
         )
         schema_path = None
+
 
     init_db(db, schema_path)
 

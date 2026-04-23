@@ -5,6 +5,7 @@ from app.db.database import Database
 from app.db.schema_fallback import DEFAULT_SCHEMA_SQL
 
 
+
 def _table_has_fk_to_equipment(db: Database, table_name: str) -> bool:
     rows = db.query_all(f"PRAGMA foreign_key_list({table_name})")
     return any((row["table"] == "equipment") for row in rows)
@@ -82,6 +83,15 @@ def _migrate_remove_equipment_fk_from_trip_equipment(db: Database) -> None:
     )
 
 
+def init_db(db: Database, schema_path: Path) -> None:
+    """Инициализирует схему и базовые справочники при первом запуске."""
+    schema_sql = schema_path.read_text(encoding="utf-8")
+    with db.transaction():
+        db.conn.executescript(schema_sql)
+
+        # Миграция старой схемы: удаляем FK на equipment в movements/trip_equipment,
+        # чтобы можно было хранить перемещения/связи рейсов для серийников,
+        # которых ещё нет в таблице equipment.
 def init_db(db: Database, schema_path: Path | None) -> None:
     """Инициализирует схему и базовые справочники при первом запуске."""
     schema_sql = DEFAULT_SCHEMA_SQL
@@ -90,6 +100,7 @@ def init_db(db: Database, schema_path: Path | None) -> None:
 
     with db.transaction():
         db.conn.executescript(schema_sql)
+
 
         if _table_has_fk_to_equipment(db, "movements"):
             _migrate_remove_equipment_fk_from_movements(db)
