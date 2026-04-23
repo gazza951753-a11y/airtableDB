@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.repo = repo
         self.import_service = ImportService(repo)
+        self._last_progress_value = -1
         self.setWindowTitle("Локальная база оборудования")
         self.resize(1600, 900)
 
@@ -372,11 +373,25 @@ class MainWindow(QMainWindow):
 
     def on_import_progress(self, value: int, text: str) -> None:
         self.import_progress.setValue(value)
-        self.import_log.append(text)
+        # Уменьшаем нагрузку на UI: не пишем в лог каждое событие прогресса.
+        if value == 100 or value == 0 or value - self._last_progress_value >= 5:
+            self.import_log.append(text)
+            self._last_progress_value = value
 
     def on_import_finished(self, result: dict) -> None:
         self.import_progress.setValue(100)
+        details = result.get("details", {})
         self.import_log.append(f"Готово: {result}")
+        if details:
+            self.import_log.append(f"Детали импорта: {details}")
+        if result.get("added", 0) == 0 and result.get("updated", 0) == 0:
+            QMessageBox.warning(
+                self,
+                "Импорт завершён без загрузки данных",
+                "Импорт не добавил строк. Откроется вкладка 'Журнал ошибок' для проверки причин.",
+            )
+            self.tabs.setCurrentWidget(self.errors_tab)
+        self._last_progress_value = -1
         self.refresh_all()
 
     def on_import_error(self, message: str) -> None:

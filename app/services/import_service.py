@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,35 +18,74 @@ class ImportService:
         self.repo = repo
 
     @staticmethod
-    def _find_column(columns: list[str], aliases: list[str]) -> str | None:
-        lower_map = {c.lower().strip(): c for c in columns}
+    def _normalize_col_name(name: str) -> str:
+        text = str(name).strip().lower().replace("ё", "е")
+        # Оставляем только буквы/цифры для устойчивого сопоставления.
+        return re.sub(r"[^a-zа-я0-9]+", "", text)
+
+    @classmethod
+    def _find_column(cls, columns: list[str], aliases: list[str]) -> str | None:
+        """
+        Ищет колонку сначала точным совпадением нормализованных имён,
+        затем по вхождению alias в имя колонки.
+        """
+        normalized_to_original = {cls._normalize_col_name(c): c for c in columns}
+        normalized_columns = list(normalized_to_original.keys())
+
         for alias in aliases:
-            key = alias.lower().strip()
-            if key in lower_map:
-                return lower_map[key]
+            key = cls._normalize_col_name(alias)
+            if key in normalized_to_original:
+                return normalized_to_original[key]
+
+        for alias in aliases:
+            key = cls._normalize_col_name(alias)
+            for col_norm in normalized_columns:
+                if key and key in col_norm:
+                    return normalized_to_original[col_norm]
+
         return None
 
-    def _column_or_empty(self, row: pd.Series, col: str | None) -> Any:
+    @staticmethod
+    def _column_or_empty(row: pd.Series, col: str | None) -> Any:
         return row[col] if col and col in row else None
 
+    @staticmethod
+    def _report_progress(progress: ProgressCb | None, idx: int, total: int, title: str) -> None:
+        if not progress:
+            return
+        if idx == 0 or idx == total - 1 or (idx + 1) % 200 == 0:
+            progress(int((idx + 1) / max(total, 1) * 100), f"{title}: {idx + 1}/{total}")
+
     def import_equipment(self, file_path: str, progress: ProgressCb | None = None) -> dict[str, Any]:
-        df = read_tabular_file(file_path)
-        df = df.fillna("")
+        df = read_tabular_file(file_path).fillna("")
         columns = list(df.columns)
 
-        serial_col = self._find_column(columns, ["serial_number", "serial", "серийный номер"])
-        inv_col = self._find_column(columns, ["inventory_number", "инвентарный номер", "inventory"])
+        serial_col = self._find_column(columns, ["serial_number", "serial number", "serial", "серийный номер", "заводской номер"])
+        inv_col = self._find_column(columns, ["inventory_number", "inventory number", "инвентарный номер", "inventory"])
         status_col = self._find_column(columns, ["status", "статус"])
-        name_col = self._find_column(columns, ["equipment_name", "наименование", "nomenclature_name"])
-        location_col = self._find_column(columns, ["location", "location_current", "местоположение"])
+        name_col = self._find_column(columns, ["equipment_name", "equipment name", "наименование", "nomenclature_name"])
+        location_col = self._find_column(columns, ["location", "location_current", "местоположение", "местонахождение"])
 
         batch_id = self.repo.create_import_batch("equipment", Path(file_path).name)
         stats = {"added": 0, "updated": 0, "skipped": 0, "conflicts": 0}
 
+        if not serial_col:
+            with self.repo.db.transaction():
+                self.repo.log_import_error(
+                    batch_id,
+                    file_path,
+                    "header",
+                    "missing_serial_column",
+                    "Не найдена колонка serial_number в файле оборудования",
+                    {"columns": [str(c) for c in columns]},
+                )
+                details = {"rows": len(df), "columns": [str(c) for c in columns]}
+            self.repo.close_import_batch(batch_id, stats, details)
+            return {"batch_id": batch_id, **stats, "details": details}
+
         with self.repo.db.transaction():
             for idx, row in df.iterrows():
-                if progress and idx % 50 == 0:
-                    progress(int((idx + 1) / max(len(df), 1) * 100), f"Импорт оборудования: {idx + 1}/{len(df)}")
+                self._report_progress(progress, idx, len(df), "Импорт оборудования")
 
                 serial_number = normalize_text(self._column_or_empty(row, serial_col))
                 if not serial_number:
@@ -84,15 +124,16 @@ class ImportService:
                     stats[result] += 1
 
             self.repo.refresh_current_locations()
-            self.repo.close_import_batch(batch_id, stats, {"rows": len(df)})
-        return {"batch_id": batch_id, **stats}
+            details = {"rows": len(df), "serial_column": serial_col}
+            self.repo.close_import_batch(batch_id, stats, details)
+        return {"batch_id": batch_id, **stats, "details": details}
 
     def import_movements(self, file_path: str, progress: ProgressCb | None = None) -> dict[str, Any]:
         df = read_tabular_file(file_path).fillna("")
         columns = list(df.columns)
 
         date_col = self._find_column(columns, ["movement_date", "date", "дата", "дата перемещения"])
-        serial_col = self._find_column(columns, ["serial_number", "serial", "серийный номер", "приборы"])
+        serial_col = self._find_column(columns, ["serial_number", "serial", "серийный номер", "приборы", "оборудование"])
         inv_col = self._find_column(columns, ["inventory_number", "инвентарный номер"])
         from_col = self._find_column(columns, ["from_location", "откуда", "from"])
         to_col = self._find_column(columns, ["to_location", "куда", "to"])
@@ -101,10 +142,23 @@ class ImportService:
         batch_id = self.repo.create_import_batch("movements", Path(file_path).name)
         stats = {"added": 0, "updated": 0, "skipped": 0, "conflicts": 0}
 
+        if not serial_col or not date_col:
+            with self.repo.db.transaction():
+                self.repo.log_import_error(
+                    batch_id,
+                    file_path,
+                    "header",
+                    "missing_required_column",
+                    "Не найдены обязательные колонки для импорта перемещений (date/serial)",
+                    {"columns": [str(c) for c in columns]},
+                )
+                details = {"rows": len(df), "columns": [str(c) for c in columns]}
+            self.repo.close_import_batch(batch_id, stats, details)
+            return {"batch_id": batch_id, **stats, "details": details}
+
         with self.repo.db.transaction():
             for idx, row in df.iterrows():
-                if progress and idx % 50 == 0:
-                    progress(int((idx + 1) / max(len(df), 1) * 100), f"Импорт перемещений: {idx + 1}/{len(df)}")
+                self._report_progress(progress, idx, len(df), "Импорт перемещений")
 
                 movement_date = parse_date(self._column_or_empty(row, date_col))
                 if not movement_date:
@@ -137,9 +191,10 @@ class ImportService:
                     stats[result] += 1
 
             self.repo.refresh_current_locations()
-            self.repo.close_import_batch(batch_id, stats, {"rows": len(df)})
+            details = {"rows": len(df), "serial_column": serial_col, "date_column": date_col}
+            self.repo.close_import_batch(batch_id, stats, details)
 
-        return {"batch_id": batch_id, **stats}
+        return {"batch_id": batch_id, **stats, "details": details}
 
     def import_trips(self, file_path: str, progress: ProgressCb | None = None) -> dict[str, Any]:
         df = read_tabular_file(file_path).fillna("")
@@ -153,10 +208,23 @@ class ImportService:
         batch_id = self.repo.create_import_batch("trips", Path(file_path).name)
         stats = {"added": 0, "updated": 0, "skipped": 0, "conflicts": 0}
 
+        if not trip_name_col:
+            with self.repo.db.transaction():
+                self.repo.log_import_error(
+                    batch_id,
+                    file_path,
+                    "header",
+                    "missing_trip_name_column",
+                    "Не найдена обязательная колонка trip_name",
+                    {"columns": [str(c) for c in columns]},
+                )
+                details = {"rows": len(df), "columns": [str(c) for c in columns]}
+            self.repo.close_import_batch(batch_id, stats, details)
+            return {"batch_id": batch_id, **stats, "details": details}
+
         with self.repo.db.transaction():
             for idx, row in df.iterrows():
-                if progress and idx % 50 == 0:
-                    progress(int((idx + 1) / max(len(df), 1) * 100), f"Импорт рейсов: {idx + 1}/{len(df)}")
+                self._report_progress(progress, idx, len(df), "Импорт рейсов")
 
                 trip_name = normalize_text(self._column_or_empty(row, trip_name_col))
                 if not trip_name:
@@ -186,6 +254,7 @@ class ImportService:
                     if clean_serial:
                         self.repo.add_trip_equipment(trip_id, clean_serial)
 
-            self.repo.close_import_batch(batch_id, stats, {"rows": len(df)})
+            details = {"rows": len(df), "trip_name_column": trip_name_col}
+            self.repo.close_import_batch(batch_id, stats, details)
 
-        return {"batch_id": batch_id, **stats}
+        return {"batch_id": batch_id, **stats, "details": details}
